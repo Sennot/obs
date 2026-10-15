@@ -181,7 +181,11 @@ int WsClient::recvMessage(std::string& out) {
         if (masked)
             for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<char>(static_cast<unsigned char>(payload[i]) ^ mask[i & 3]);
 
-        if (op == 0x8) return -1;                       // close
+        if (op == 0x8) {                                // close (first 2 bytes = status code)
+            if (payload.size() >= 2)
+                m_closeCode = (static_cast<unsigned char>(payload[0]) << 8) | static_cast<unsigned char>(payload[1]);
+            return -1;
+        }
         if (op == 0x9) {                                // ping -> pong
             sendFrame(0xA, payload);
             if (!fragmenting) return 0;
@@ -203,6 +207,7 @@ void WsClient::run() {
     for (;;) {
         Endpoint ep = endpoint ? endpoint() : Endpoint{"127.0.0.1", 4455};
         if (connectAndUpgrade(ep)) {
+            m_closeCode = 0;
             m_connected = true;
             if (onOpen) onOpen();
             auto lastTick = std::chrono::steady_clock::now();

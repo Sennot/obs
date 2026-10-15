@@ -26,6 +26,7 @@ public:
     void start();
     bool send(std::string const& text);
     bool connected() const { return m_connected.load(); }
+    int closeCode() const { return m_closeCode.load(); }   // last close code sent by the server, 0 = none
 
 private:
     void run();
@@ -37,6 +38,7 @@ private:
 
     std::atomic<bool> m_connected{false};
     std::atomic<bool> m_started{false};
+    std::atomic<int> m_closeCode{0};
     std::mutex m_sendMutex;
     unsigned long long m_sock = ~0ull;  // SOCKET
 };
