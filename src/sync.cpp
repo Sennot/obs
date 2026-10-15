@@ -108,7 +108,6 @@ void handleMessage(std::string const& text) {
         std::string identify = "{\"op\":1,\"d\":{\"rpcVersion\":1,\"eventSubscriptions\":64";  // Outputs
         if (d.contains("authentication")) {
             auto password = Mod::get()->getSettingValue<std::string>("obs-password");
-            if (password.empty()) log::warn("ClickSync: OBS requires a password, but the 'OBS Password' setting is empty");
             auto challenge = d["authentication"]["challenge"].asString().unwrapOr("");
             auto salt = d["authentication"]["salt"].asString().unwrapOr("");
             identify += ",\"authentication\":" + quote(obsAuth(password, salt, challenge));
@@ -189,11 +188,7 @@ void syncStart() {
     g_ws.onClose = [] {
         std::lock_guard lock(g.mutex);
         g.pending.clear();
-        int code = g_ws.closeCode();
-        if (code == 4009)
-            log::warn("ClickSync: OBS rejected the password (close code 4009). Check 'OBS Password' in the mod settings");
-        else
-            log::info("ClickSync: OBS connection closed (code {}), will retry", code);
+        log::info("ClickSync: OBS connection closed, will retry");
     };
     g_ws.start();
 }
