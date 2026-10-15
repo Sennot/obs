@@ -21,4 +21,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE src)
 target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(${PROJECT_NAME} ws2_32)
 
+# Geode's precompiled header pulls in windows.h, which clashes with winsock2.h.
+set_source_files_properties(src/ws_client.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+
 setup_geode_mod(${PROJECT_NAME})
