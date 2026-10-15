@@ -1,0 +1,53 @@
+{
+	"geode": "5.8.2",
+	"gd": {
+		"win": "2.2081"
+	},
+	"id": "elkiteam.clicksync",
+	"name": "ClickSync",
+	"version": "v0.1.0",
+	"developer": "ELKITEAM",
+	"description": "Logs every click and release while OBS records and saves them with exact video timestamps for the Click Sampler Vegas plugin.",
+	"tags": ["utility", "offline"],
+	"settings": {
+		"enabled": {
+			"type": "bool",
+			"name": "Enabled",
+			"description": "Log button presses and releases.",
+			"default": true
+		},
+		"title-obs": {
+			"type": "title",
+			"name": "OBS"
+		},
+		"obs-host": {
+			"type": "string",
+			"name": "OBS Host",
+			"description": "Address of the obs-websocket server (OBS: Tools > WebSocket Server Settings).",
+			"default": "127.0.0.1"
+		},
+		"obs-port": {
+			"type": "int",
+			"name": "OBS Port",
+			"default": 4455,
+			"min": 1,
+			"max": 65535
+		},
+		"obs-password": {
+			"type": "string",
+			"name": "OBS Password",
+			"description": "Leave empty if authentication is disabled in OBS.",
+			"default": ""
+		},
+		"title-output": {
+			"type": "title",
+			"name": "Output"
+		},
+		"output-dir": {
+			"type": "string",
+			"name": "Output Folder",
+			"description": "Where the .json files are saved. Empty = Documents/ClickSampler/Sync.",
+			"default": ""
+		}
+	}
+}

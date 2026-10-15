@@ -1,0 +1,9 @@
+build/
+build-*/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.geode
+.vs/
+.idea/
