@@ -18,6 +18,8 @@ struct Event {
     int attempt = 0;
     std::string level;
     int levelId = 0;
+    long long tick = -1;    // physics steps done when the input was processed (GJGameState::m_currentProgress), -1 = unknown
+    int frameOffset = 0;    // xdBot's "Frame Offset" setting at that moment
 };
 
 struct Attempt {
@@ -43,6 +45,14 @@ struct Mapping {
 };
 
 Mapping computeMapping(std::vector<Anchor> const& anchors, bool haveStart, double startMs);
+
+// A session is only worth a file when it knows where its inputs are in a video. The Click Sampler plugin
+// refuses anything else, so the rest is just clutter (and used to overwrite latest.json).
+bool shouldSave(Mapping const& mapping, bool saveWithoutObs);
+
+// Ticks per second the game really ran at, from tick / level time of the logged inputs (median).
+// `fallback` when there is nothing to measure.
+double estimateTps(std::vector<Event> const& events, double fallback);
 
 std::string jsonEscape(std::string const& s);
 

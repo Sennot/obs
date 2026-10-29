@@ -5,7 +5,7 @@
 	},
 	"id": "elkiteam.clicksync",
 	"name": "ClickSync",
-	"version": "v0.1.0",
+	"version": "v0.2.0",
 	"developer": "ELKITEAM",
 	"description": "Logs every click and release while OBS records and saves them with exact video timestamps for the Click Sampler Vegas plugin.",
 	"tags": ["utility", "offline"],
@@ -15,6 +15,18 @@
 			"name": "Enabled",
 			"description": "Log button presses and releases.",
 			"default": true
+		},
+		"notifications": {
+			"type": "bool",
+			"name": "Notifications",
+			"description": "Show a small toast when OBS starts recording (clicks are being logged) and when a file is saved.",
+			"default": true
+		},
+		"save-without-obs": {
+			"type": "bool",
+			"name": "Save without OBS",
+			"description": "Also save sessions where OBS was not recording. They have no video time, the Click Sampler plugin cannot use them, so by default they are not saved at all.",
+			"default": false
 		},
 		"title-obs": {
 			"type": "title",

@@ -17,7 +17,8 @@ class $modify(CSGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
         auto* pl = PlayLayer::get();
         if (!pl || static_cast<GJBaseGameLayer*>(pl) != this) return;
-        clicksync::syncLogButton(down, button, isPlayer1, m_gameState.m_levelTime, pl->m_isPracticeMode);
+        clicksync::syncLogButton(down, button, isPlayer1, m_gameState.m_levelTime, pl->m_isPracticeMode,
+                                 m_gameState.m_currentProgress);
     }
 };
 

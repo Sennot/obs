@@ -47,6 +47,22 @@ bool g_started = false;
 
 std::string quote(std::string const& s) { return "\"" + jsonEscape(s) + "\""; }
 
+bool boolSetting(char const* key) { return Mod::get()->getSettingValue<bool>(key); }
+
+// xdBot subtracts its "Frame Offset" setting from every frame it records. Settings are public, no offsets needed.
+int xdbotFrameOffset() {
+    auto* xd = Loader::get()->getLoadedMod("zilko.xdbot");
+    if (!xd || !xd->hasSetting("frame_offset")) return 0;
+    return static_cast<int>(xd->getSettingValue<int64_t>("frame_offset"));
+}
+
+void notifyMainThread(std::string text) {
+    if (!boolSetting("notifications")) return;
+    Loader::get()->queueInMainThread([text = std::move(text)] {
+        Notification::create(text, NotificationIcon::Success, 2.5f)->show();
+    });
+}
+
 std::filesystem::path outputDir() {
     auto custom = Mod::get()->getSettingValue<std::string>("output-dir");
     if (!custom.empty()) return std::filesystem::u8path(custom);
@@ -65,6 +81,15 @@ void flushLocked(char const* why) {
         return;
     }
     Mapping mapping = computeMapping(g.anchors, g.recActive || !g.recPath.empty(), g.recStartMs);
+    bool hasVideo = mapping.method != Mapping::Method::None;
+    if (!shouldSave(mapping, boolSetting("save-without-obs"))) {
+        log::info("ClickSync: dropped {} inputs ({}), OBS was not recording", g.events.size(), why);
+        g.events.clear();
+        g.attempts.clear();
+        g.anchors.clear();
+        g.attemptNo = 0;
+        return;
+    }
     std::string json = buildJson(g.events, g.attempts, mapping, g.recPath);
 
     std::error_code ec;
@@ -78,13 +103,18 @@ void flushLocked(char const* why) {
     std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tm);
     auto file = dir / (std::string("clicksync_") + stamp + ".json");
 
-    for (auto const& path : {file, dir / "latest.json"}) {
+    // latest.json is what the plugin's "latest" button opens, so only a session with video time may take it over
+    std::vector<std::filesystem::path> targets = {file};
+    if (hasVideo) targets.push_back(dir / "latest.json");
+    for (auto const& path : targets) {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out << json;
     }
     log::info("ClickSync: saved {} events ({}, sync={}) to {}", g.events.size(), why,
               mapping.method == Mapping::Method::Anchor ? "anchor" : mapping.method == Mapping::Method::Start ? "start" : "none",
               file.string());
+
+    if (hasVideo) notifyMainThread("ClickSync: saved " + std::to_string(g.events.size()) + " clicks");
 
     g.events.clear();
     g.attempts.clear();
@@ -133,6 +163,7 @@ void handleMessage(std::string const& text) {
                 g.anchors.clear();
                 g.attemptNo = 0;
                 log::info("ClickSync: OBS recording started");
+                notifyMainThread("ClickSync: logging clicks for the OBS recording");
             } else if (state == "OBS_WEBSOCKET_OUTPUT_STOPPED") {
                 g.recActive = false;
                 g.recPath = path;
@@ -193,11 +224,13 @@ void syncStart() {
     g_ws.start();
 }
 
-void syncLogButton(bool down, int button, bool player1, double levelTime, bool practice) {
+void syncLogButton(bool down, int button, bool player1, double levelTime, bool practice, long long tick) {
     if (!Mod::get()->getSettingValue<bool>("enabled")) return;
     Event e;
     e.tsMs = nowMs();
     e.levelTime = levelTime;
+    e.tick = tick;
+    e.frameOffset = xdbotFrameOffset();
     e.down = down;
     e.button = button;
     e.p2 = !player1;

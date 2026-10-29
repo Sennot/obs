@@ -8,7 +8,7 @@ namespace clicksync {
 void syncStart();
 
 // Called from game hooks (main thread).
-void syncLogButton(bool down, int button, bool player1, double levelTime, bool practice);
+void syncLogButton(bool down, int button, bool player1, double levelTime, bool practice, long long tick);
 void syncAttempt(std::string const& level, int levelId);
 void syncLevelEnd();
 
