@@ -20,6 +20,7 @@ struct Event {
     int levelId = 0;
     long long tick = -1;    // physics steps done when the input was processed (GJGameState::m_currentProgress), -1 = unknown
     int frameOffset = 0;    // xdBot's "Frame Offset" setting at that moment
+    double xdTps = 240.0;   // TPS xdBot numbers its macro frames with (its TPS setting, 240 when that is off)
 };
 
 struct Attempt {
@@ -36,15 +37,47 @@ struct Anchor {
     double videoS = 0;
 };
 
+// Steady-clock span where the recording was paused: none of it is in the video.
+struct Pause {
+    double fromMs = 0;
+    double toMs = -1;       // -1 = still paused when the recording stopped
+};
+
+// Everything the OBS connection learned about one recording.
+struct ObsTiming {
+    std::vector<Anchor> anchors;
+    bool haveStart = false; // RecordStateChanged STARTED arrived while connected
+    double startMs = 0;     // ...at this steady time: OBS hooks its encoders there, so it is video frame 0
+    double stopLagMs = -1;  // STOPPING -> STOPPED: OBS flushing frames still in its pipeline, -1 = not seen
+    std::vector<Pause> pauses;
+};
+
 struct Mapping {
     enum class Method { None, Anchor, Start };
     Method method = Method::None;
-    double offsetS = 0;     // video seconds = tsMs / 1000 + offsetS
+    double offsetS = 0;     // video seconds = tsMs / 1000 + offsetS - time paused before tsMs
     double bestRttMs = 0;
     int anchors = 0;
+    // How far OBS's outputDuration runs behind the picture: frames wait for audio buffering (up to 960 ms)
+    // and the encoder before they are counted.
+    bool lagKnown = false;
+    double lagMs = 0;
+    double stopLagMs = -1;
+    std::vector<Pause> pauses;
+
+    bool hasVideo() const { return method != Method::None; }
+    // Video second of steady time tsMs; false when that moment is not in the video (no mapping, paused).
+    bool videoAt(double tsMs, double& videoS) const;
 };
 
-Mapping computeMapping(std::vector<Anchor> const& anchors, bool haveStart, double startMs);
+// Frame 0 of the file is the moment the recording started. GetRecordStatus can't be used for that on its own:
+// its outputDuration counts frames that already went through audio buffering and the encoder, so it lags the
+// picture by up to a second, and by a different amount in every OBS session. It only fills in when the start
+// was missed (mod connected to a running recording), corrected by the lag OBS showed while stopping.
+Mapping computeMapping(ObsTiming const& timing);
+
+// xdBot's frame number for a level time: floor(level time * its TPS) + 1 - its Frame Offset, never below 0.
+long long xdbotFrame(double levelTime, double xdTps, int frameOffset);
 
 // A session is only worth a file when it knows where its inputs are in a video. The Click Sampler plugin
 // refuses anything else, so the rest is just clutter (and used to overwrite latest.json).

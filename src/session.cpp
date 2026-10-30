@@ -6,12 +6,41 @@
 
 namespace clicksync {
 
-Mapping computeMapping(std::vector<Anchor> const& anchors, bool haveStart, double startMs) {
+namespace {
+
+// Paused milliseconds between the recording start and tsMs.
+double pausedBefore(std::vector<Pause> const& pauses, double tsMs) {
+    double total = 0;
+    for (auto const& p : pauses) {
+        if (p.fromMs >= tsMs) continue;
+        double to = p.toMs < 0 ? tsMs : std::min(p.toMs, tsMs);
+        total += to - p.fromMs;
+    }
+    return total;
+}
+
+}  // namespace
+
+bool Mapping::videoAt(double tsMs, double& videoS) const {
+    if (method == Method::None) return false;
+    for (auto const& p : pauses) {
+        if (tsMs >= p.fromMs && (p.toMs < 0 || tsMs < p.toMs)) return false;
+    }
+    videoS = (tsMs - pausedBefore(pauses, tsMs)) / 1000.0 + offsetS;
+    return true;
+}
+
+Mapping computeMapping(ObsTiming const& timing) {
     Mapping m;
-    m.anchors = static_cast<int>(anchors.size());
-    if (!anchors.empty()) {
+    m.anchors = static_cast<int>(timing.anchors.size());
+    m.stopLagMs = timing.stopLagMs;
+    m.pauses = timing.pauses;
+
+    bool haveAnchors = !timing.anchors.empty();
+    double anchorOffset = 0;
+    if (haveAnchors) {
         // Median offset of the lowest-latency round trips: robust against slow replies.
-        std::vector<Anchor> sorted = anchors;
+        std::vector<Anchor> sorted = timing.anchors;
         std::sort(sorted.begin(), sorted.end(), [](Anchor const& a, Anchor const& b) {
             return (a.recvMs - a.sendMs) < (b.recvMs - b.sendMs);
         });
@@ -19,21 +48,41 @@ Mapping computeMapping(std::vector<Anchor> const& anchors, bool haveStart, doubl
         std::vector<double> offsets;
         for (size_t i = 0; i < take; ++i) {
             double mid = (sorted[i].sendMs + sorted[i].recvMs) / 2.0;
-            offsets.push_back(sorted[i].videoS - mid / 1000.0);
+            offsets.push_back(sorted[i].videoS - (mid - pausedBefore(timing.pauses, mid)) / 1000.0);
         }
         std::sort(offsets.begin(), offsets.end());
-        m.method = Mapping::Method::Anchor;
-        m.offsetS = offsets[offsets.size() / 2];
+        anchorOffset = offsets[offsets.size() / 2];
         m.bestRttMs = sorted.front().recvMs - sorted.front().sendMs;
-    } else if (haveStart) {
+    }
+
+    if (timing.haveStart) {
         m.method = Mapping::Method::Start;
-        m.offsetS = -startMs / 1000.0;
+        m.offsetS = -timing.startMs / 1000.0;
+        if (haveAnchors) {
+            m.lagKnown = true;
+            m.lagMs = (m.offsetS - anchorOffset) * 1000.0;
+        }
+    } else if (haveAnchors) {
+        m.method = Mapping::Method::Anchor;
+        m.offsetS = anchorOffset;
+        if (timing.stopLagMs >= 0) {
+            m.lagKnown = true;
+            m.lagMs = timing.stopLagMs;
+            m.offsetS += timing.stopLagMs / 1000.0;
+        }
     }
     return m;
 }
 
+long long xdbotFrame(double levelTime, double xdTps, int frameOffset) {
+    // the epsilon keeps a level time that is a whole frame (62 steps at 480 TPS = 31 frames at 240) from
+    // landing one frame short through floating point
+    long long frame = static_cast<long long>(std::floor(levelTime * xdTps + 1e-6)) + 1 - frameOffset;
+    return frame < 0 ? 0 : frame;
+}
+
 bool shouldSave(Mapping const& mapping, bool saveWithoutObs) {
-    return mapping.method != Mapping::Method::None || saveWithoutObs;
+    return mapping.hasVideo() || saveWithoutObs;
 }
 
 double estimateTps(std::vector<Event> const& events, double fallback) {
@@ -84,8 +133,10 @@ std::string num(double v, int digits = 4) {
 
 std::string buildJson(std::vector<Event> const& events, std::vector<Attempt> const& attempts,
                       Mapping const& mapping, std::string const& obsPath, double tps) {
-    bool hasVideo = mapping.method != Mapping::Method::None;
-    auto videoOf = [&](double tsMs) { return tsMs / 1000.0 + mapping.offsetS; };
+    auto videoOf = [&](double tsMs) {
+        double v;
+        return mapping.videoAt(tsMs, v) ? num(v) : std::string("null");
+    };
     tps = estimateTps(events, tps);
     char const* method = mapping.method == Mapping::Method::Anchor  ? "anchor"
                          : mapping.method == Mapping::Method::Start ? "start"
@@ -96,14 +147,17 @@ std::string buildJson(std::vector<Event> const& events, std::vector<Attempt> con
     j += "  \"obs\": {\n    \"recording\": \"" + jsonEscape(obsPath) + "\",\n";
     j += std::string("    \"sync_method\": \"") + method + "\",\n";
     j += "    \"anchors\": " + std::to_string(mapping.anchors) + ",\n";
-    j += "    \"best_rtt_ms\": " + num(mapping.bestRttMs, 2) + "\n  },\n";
+    j += "    \"best_rtt_ms\": " + num(mapping.bestRttMs, 2) + ",\n";
+    j += "    \"pipeline_lag_ms\": " + (mapping.lagKnown ? num(mapping.lagMs, 1) : std::string("null")) + ",\n";
+    j += "    \"stop_lag_ms\": " + (mapping.stopLagMs >= 0 ? num(mapping.stopLagMs, 1) : std::string("null")) + ",\n";
+    j += "    \"pauses\": " + std::to_string(mapping.pauses.size()) + "\n  },\n";
 
     j += "  \"attempts\": [";
     for (size_t i = 0; i < attempts.size(); ++i) {
         auto const& a = attempts[i];
         j += i ? ",\n    " : "\n    ";
         j += "{\"n\": " + std::to_string(a.number) + ", \"level\": \"" + jsonEscape(a.level) + "\", \"level_id\": " +
-             std::to_string(a.levelId) + ", \"video_s\": " + (hasVideo ? num(videoOf(a.tsMs)) : "null") + "}";
+             std::to_string(a.levelId) + ", \"video_s\": " + videoOf(a.tsMs) + "}";
     }
     j += attempts.empty() ? "],\n" : "\n  ],\n";
 
@@ -111,13 +165,10 @@ std::string buildJson(std::vector<Event> const& events, std::vector<Attempt> con
     for (size_t i = 0; i < events.size(); ++i) {
         auto const& e = events[i];
         j += i ? ",\n    " : "\n    ";
-        j += "{\"video_s\": " + (hasVideo ? num(videoOf(e.tsMs)) : std::string("null"));
+        j += "{\"video_s\": " + videoOf(e.tsMs);
         j += ", \"level_time\": " + num(e.levelTime, 5);
-        // xdBot numbers its macro frames from 1: floor(level time * tps) + 1, minus its Frame Offset setting.
-        // The step counter gives the same number without the rounding.
-        long long frame = e.tick >= 0 ? e.tick + 1 - e.frameOffset
-                                      : static_cast<long long>(std::llround(e.levelTime * tps));
-        j += ", \"frame\": " + std::to_string(frame);
+        // the frame number xdBot's macro editor shows for this input (verified against a recorded .gdr)
+        j += ", \"frame\": " + std::to_string(xdbotFrame(e.levelTime, e.xdTps, e.frameOffset));
         if (e.tick >= 0) j += ", \"tick\": " + std::to_string(e.tick);
         j += std::string(", \"down\": ") + (e.down ? "true" : "false");
         j += ", \"button\": " + std::to_string(e.button);
@@ -131,3 +182,4 @@ std::string buildJson(std::vector<Event> const& events, std::vector<Attempt> con
 }
 
 }  // namespace clicksync
+

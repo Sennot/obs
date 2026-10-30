@@ -29,10 +29,10 @@ struct State {
     std::mutex mutex;
     std::vector<Event> events;
     std::vector<Attempt> attempts;
-    std::vector<Anchor> anchors;
+    ObsTiming timing;
     std::unordered_map<std::string, double> pending;  // request id -> send time
     bool recActive = false;
-    double recStartMs = 0;
+    double stoppingMs = -1;
     std::string recPath;
     std::string level;
     int levelId = 0;
@@ -56,6 +56,25 @@ int xdbotFrameOffset() {
     return static_cast<int>(xd->getSettingValue<int64_t>("frame_offset"));
 }
 
+// xdBot numbers macro frames with its own TPS (saved values "macro_tps_enabled" / "macro_tps"), not with the
+// steps the game really runs: at 480 game TPS a 240 TPS macro still says frame 32 where the step counter says 63.
+double xdbotTps() {
+    auto* xd = Loader::get()->getLoadedMod("zilko.xdbot");
+    // getSavedValue with a default would write that default into xdBot's save, so check first
+    if (!xd || !xd->hasSavedValue("macro_tps_enabled") || !xd->hasSavedValue("macro_tps")) return 240.0;
+    if (!xd->getSavedValue<bool>("macro_tps_enabled")) return 240.0;
+    double tps = xd->getSavedValue<double>("macro_tps");
+    return tps > 0 ? tps : 240.0;
+}
+
+void resetSessionLocked() {
+    g.events.clear();
+    g.attempts.clear();
+    g.timing = {};
+    g.stoppingMs = -1;
+    g.attemptNo = 0;
+}
+
 void notifyMainThread(std::string text) {
     if (!boolSetting("notifications")) return;
     Loader::get()->queueInMainThread([text = std::move(text)] {
@@ -75,19 +94,14 @@ std::filesystem::path outputDir() {
 // Must be called with g.mutex held. Clears the session.
 void flushLocked(char const* why) {
     if (g.events.empty()) {
-        g.attempts.clear();
-        g.anchors.clear();
-        g.attemptNo = 0;
+        resetSessionLocked();
         return;
     }
-    Mapping mapping = computeMapping(g.anchors, g.recActive || !g.recPath.empty(), g.recStartMs);
-    bool hasVideo = mapping.method != Mapping::Method::None;
+    Mapping mapping = computeMapping(g.timing);
+    bool hasVideo = mapping.hasVideo();
     if (!shouldSave(mapping, boolSetting("save-without-obs"))) {
         log::info("ClickSync: dropped {} inputs ({}), OBS was not recording", g.events.size(), why);
-        g.events.clear();
-        g.attempts.clear();
-        g.anchors.clear();
-        g.attemptNo = 0;
+        resetSessionLocked();
         return;
     }
     std::string json = buildJson(g.events, g.attempts, mapping, g.recPath);
@@ -110,16 +124,18 @@ void flushLocked(char const* why) {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out << json;
     }
-    log::info("ClickSync: saved {} events ({}, sync={}) to {}", g.events.size(), why,
+    log::info("ClickSync: saved {} events ({}, sync={}, OBS lag {} ms, stop lag {} ms, {} pauses) to {}",
+              g.events.size(), why,
               mapping.method == Mapping::Method::Anchor ? "anchor" : mapping.method == Mapping::Method::Start ? "start" : "none",
-              file.string());
+              mapping.lagKnown ? std::to_string(static_cast<int>(mapping.lagMs)) : std::string("?"),
+              static_cast<int>(mapping.stopLagMs), mapping.pauses.size(), file.string());
+    if (mapping.method == Mapping::Method::Anchor) {
+        log::warn("ClickSync: the recording started before OBS was connected, video time is less exact");
+    }
 
     if (hasVideo) notifyMainThread("ClickSync: saved " + std::to_string(g.events.size()) + " clicks");
 
-    g.events.clear();
-    g.attempts.clear();
-    g.anchors.clear();
-    g.attemptNo = 0;
+    resetSessionLocked();
 }
 
 void requestStatus(std::string const& id) {
@@ -153,18 +169,26 @@ void handleMessage(std::string const& text) {
         if (type == "RecordStateChanged") {
             auto state = d["eventData"]["outputState"].asString().unwrapOr("");
             auto path = d["eventData"]["outputPath"].asString().unwrapOr("");
+            double now = nowMs();
             std::lock_guard lock(g.mutex);
             if (state == "OBS_WEBSOCKET_OUTPUT_STARTED") {
+                // OBS sends this when it hooks the encoders: the next frame it draws is frame 0 of the file
+                resetSessionLocked();
                 g.recActive = true;
-                g.recStartMs = nowMs();
                 g.recPath.clear();
-                g.events.clear();
-                g.attempts.clear();
-                g.anchors.clear();
-                g.attemptNo = 0;
+                g.timing.haveStart = true;
+                g.timing.startMs = now;
                 log::info("ClickSync: OBS recording started");
                 notifyMainThread("ClickSync: logging clicks for the OBS recording");
+            } else if (state == "OBS_WEBSOCKET_OUTPUT_STOPPING") {
+                g.stoppingMs = now;
+            } else if (state == "OBS_WEBSOCKET_OUTPUT_PAUSED") {
+                if (g.recActive) g.timing.pauses.push_back({now, -1});
+            } else if (state == "OBS_WEBSOCKET_OUTPUT_RESUMED") {
+                if (!g.timing.pauses.empty() && g.timing.pauses.back().toMs < 0) g.timing.pauses.back().toMs = now;
             } else if (state == "OBS_WEBSOCKET_OUTPUT_STOPPED") {
+                // OBS keeps writing until the frame of the stop request is through its pipeline
+                if (g.stoppingMs >= 0) g.timing.stopLagMs = now - g.stoppingMs;
                 g.recActive = false;
                 g.recPath = path;
                 flushLocked("obs stopped");
@@ -175,6 +199,7 @@ void handleMessage(std::string const& text) {
         auto id = d["requestId"].asString().unwrapOr("");
         auto const& data = d["responseData"];
         bool active = data["outputActive"].asBool().unwrapOr(false);
+        bool paused = data["outputPaused"].asBool().unwrapOr(false);
         double durationMs = data["outputDuration"].asDouble().unwrapOr(0.0);
         std::lock_guard lock(g.mutex);
         double recv = nowMs();
@@ -182,13 +207,15 @@ void handleMessage(std::string const& text) {
         double send = it != g.pending.end() ? it->second : recv;
         g.pending.erase(id);
         if (id == "init") {
+            // a recording that was already running: its start is unknown, the anchors have to do
             if (active && !g.recActive) {
                 g.recActive = true;
-                g.recStartMs = recv - durationMs;
+                log::warn("ClickSync: OBS was already recording, start the recording after the game for exact sync");
             }
-        } else if (active && g.recActive) {
-            g.anchors.push_back({send, recv, durationMs / 1000.0});
-            if (g.anchors.size() > 7200) g.anchors.erase(g.anchors.begin(), g.anchors.begin() + 3600);
+        } else if (active && !paused && g.recActive) {
+            auto& anchors = g.timing.anchors;
+            anchors.push_back({send, recv, durationMs / 1000.0});
+            if (anchors.size() > 7200) anchors.erase(anchors.begin(), anchors.begin() + 3600);
         }
     }
 }
@@ -231,6 +258,7 @@ void syncLogButton(bool down, int button, bool player1, double levelTime, bool p
     e.levelTime = levelTime;
     e.tick = tick;
     e.frameOffset = xdbotFrameOffset();
+    e.xdTps = xdbotTps();
     e.down = down;
     e.button = button;
     e.p2 = !player1;
